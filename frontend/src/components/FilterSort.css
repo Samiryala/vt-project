@@ -1,0 +1,52 @@
+.filter-sort {
+  display: flex;
+  gap: 2rem;
+  margin-bottom: 2rem;
+  padding: 1.5rem;
+  background: white;
+  border-radius: 8px;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+.filter-group,
+.sort-group {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.filter-group label,
+.sort-group label {
+  font-weight: 500;
+  color: #333;
+}
+
+.filter-select,
+.sort-select {
+  padding: 0.5rem 1rem;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  font-size: 0.9rem;
+  cursor: pointer;
+  background-color: white;
+  transition: border-color 0.3s;
+}
+
+.filter-select:hover,
+.sort-select:hover {
+  border-color: #1976d2;
+}
+
+.filter-select:focus,
+.sort-select:focus {
+  outline: none;
+  border-color: #1976d2;
+  box-shadow: 0 0 0 2px rgba(25, 118, 210, 0.1);
+}
+
+@media (max-width: 768px) {
+  .filter-sort {
+    flex-direction: column;
+    gap: 1rem;
+  }
+}
