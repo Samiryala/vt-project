@@ -1,6 +1,7 @@
 import app from './app.js';
 import dotenv from 'dotenv';
 import pool from './config/database.js';
+import { triggerDailyScrapers } from './services/scraperService.js';
 
 dotenv.config();
 
@@ -12,6 +13,15 @@ const startServer = async () => {
     // Test database connection
     await pool.query('SELECT NOW()');
     console.log('✓ Database connection verified');
+
+    // Trigger daily scrapers (runs once per day)
+    console.log('📅 Triggering daily scrapers...');
+    try {
+      await triggerDailyScrapers();
+      console.log('✓ Daily scrapers check completed');
+    } catch (scraperError) {
+      console.error('⚠️ Daily scrapers error (non-fatal):', scraperError.message);
+    }
 
     // Start server
     app.listen(PORT, () => {

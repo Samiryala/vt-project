@@ -6,10 +6,15 @@
 
 import { query } from '../config/database.js';
 
+// Track if table has been initialized (avoid repeated logs)
+let tableInitialized = false;
+
 /**
  * Ensure notifications table exists
  */
 export const ensureNotificationsTable = async () => {
+  if (tableInitialized) return; // Skip if already done
+  
   const createTableQuery = `
     CREATE TABLE IF NOT EXISTS notifications (
       id SERIAL PRIMARY KEY,
@@ -24,7 +29,7 @@ export const ensureNotificationsTable = async () => {
   
   try {
     await query(createTableQuery);
-    console.log('✓ notifications table ready');
+    tableInitialized = true;
   } catch (error) {
     console.error('Error creating notifications table:', error);
     throw error;

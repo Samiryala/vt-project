@@ -27,16 +27,34 @@ pool.on('error', (err) => {
   process.exit(-1);
 });
 
+// Queries to suppress from logging (noise reduction)
+const SILENT_QUERIES = [
+  'CREATE TABLE IF NOT EXISTS',
+  'SELECT COUNT(*)',
+  'SELECT DISTINCT category',
+  'SELECT id, type, title, message, data, is_read, created_at',
+  'SELECT last_execution_date FROM script_executions',
+];
+
 // Query helper function
 export const query = async (text, params) => {
   const start = Date.now();
   try {
     const res = await pool.query(text, params);
     const duration = Date.now() - start;
-    console.log('Executed query', { text, duration, rows: res.rowCount });
+    
+    // Only log queries that are not in the silent list
+    const isSilent = SILENT_QUERIES.some(pattern => text.includes(pattern));
+    if (!isSilent) {
+      console.log('📊 Query:', { 
+        text: text.replace(/\s+/g, ' ').trim().substring(0, 100) + (text.length > 100 ? '...' : ''),
+        duration: duration + 'ms',
+        rows: res.rowCount 
+      });
+    }
     return res;
   } catch (error) {
-    console.error('Database query error:', error);
+    console.error('❌ Database query error:', error);
     throw error;
   }
 };

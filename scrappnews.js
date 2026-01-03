@@ -1,10 +1,10 @@
 // scrappnews.js
 // Scraping and data-ingestion agent for InfoQ and DB-Engines news articles
+// Scrapes LIVE from websites - no local HTML files needed
 import puppeteer from 'puppeteer';
 import pg from 'pg';
-import fs from 'fs/promises';
-import path from 'path';
 import { fileURLToPath } from 'url';
+import path from 'path';
 
 const { Pool } = pg;
 
@@ -21,68 +21,71 @@ const pool = new Pool({
   port: 5432,
 });
 
-// Source configurations
+// Source configurations - LIVE URLs
 const SOURCES = [
   {
     id: 'infoq-nosql',
     name: 'InfoQ NoSQL',
     category: 'NoSQL',
-    files: ['first_page.html'],
+    url: 'https://www.infoq.com/nosql/',
     baseUrl: 'https://www.infoq.com',
+    type: 'infoq'
   },
   {
-    id: 'infoq-newsql',
-    name: 'InfoQ NewSQL',
-    category: 'NewSQL',
-    files: ['second-page.html'],
+    id: 'infoq-data',
+    name: 'InfoQ Data',
+    category: 'Data',
+    url: 'https://www.infoq.com/data/',
     baseUrl: 'https://www.infoq.com',
+    type: 'infoq'
   },
   {
     id: 'db-engines',
     name: 'DB-Engines Blog',
     category: 'DB-Engines',
-    files: ['page1.html', 'page2.html'],
+    url: 'https://db-engines.com/en/blog',
     baseUrl: 'https://db-engines.com',
+    type: 'db-engines'
   },
 ];
 
+// ALLOWED CATEGORIES - Only these will be inserted
+const ALLOWED_CATEGORIES = ['Key-Value', 'Columnar', 'Graph', 'Document', 'Distributed SQL'];
+
 /**
  * Determine the category based on title and content
+ * Returns null if article doesn't match any allowed category
  */
-function determineCategory(title, content) {
+function determineCategory(title, content, sourceCategory) {
   const text = (title + ' ' + (content || '')).toLowerCase();
   
   // Key-Value stores
-  if (text.match(/redis|riak|memcached|key-?value/i)) {
+  if (text.match(/redis|riak|memcached|key-?value|dynamodb|aerospike|valkey/i)) {
     return 'Key-Value';
   }
   
   // Columnar stores
-  if (text.match(/cassandra|clickhouse|hbase|columnar|column|wide column/i)) {
+  if (text.match(/cassandra|clickhouse|hbase|columnar|column|wide column|scylladb|bigtable/i)) {
     return 'Columnar';
   }
   
   // Graph databases
-  if (text.match(/neo4j|tigergraph|graph|orientdb|arangodb|titan/i)) {
+  if (text.match(/neo4j|tigergraph|graph database|orientdb|arangodb|titan|dgraph|neptune/i)) {
     return 'Graph';
   }
   
   // Document stores
-  if (text.match(/mongodb|couchdb|couchbase|document/i)) {
+  if (text.match(/mongodb|couchdb|couchbase|document database|documentdb|firestore|ravendb/i)) {
     return 'Document';
   }
   
-  // Distributed SQL
-  if (text.match(/cockroachdb|tidb|yugabytedb|snowflake|databricks|distributed sql/i)) {
+  // Distributed SQL / NewSQL
+  if (text.match(/cockroachdb|tidb|yugabytedb|distributed sql|newsql|vitess|spanner|planetscale|neon/i)) {
     return 'Distributed SQL';
   }
   
-  // Relational databases
-  if (text.match(/mysql|postgresql|oracle|sql server|mariadb|relational/i)) {
-    return 'Relational';
-  }
-  
-  return 'General';
+  // Return null for articles that don't match any allowed category
+  return null;
 }
 
 /**
@@ -119,6 +122,16 @@ function parseDate(dateStr) {
     }
   }
   
+  // Handle "Jan 16, 2025" format
+  const usMatch = cleaned.match(/(\w+)\s+(\d{1,2}),?\s+(\d{4})/);
+  if (usMatch) {
+    const [, month, day, year] = usMatch;
+    const monthIndex = new Date(`${month} 1, 2000`).getMonth();
+    if (!isNaN(monthIndex)) {
+      return new Date(parseInt(year), monthIndex, parseInt(day));
+    }
+  }
+  
   return null;
 }
 
@@ -138,6 +151,33 @@ async function ensureScrapeStateTable() {
     console.log('✓ Table scrape_state ready');
   } catch (error) {
     console.error('Error creating scrape_state table:', error);
+    throw error;
+  }
+}
+
+/**
+ * Ensure articles table exists with correct schema
+ */
+async function ensureArticlesTable() {
+  const createTableQuery = `
+    CREATE TABLE IF NOT EXISTS articles (
+      id SERIAL PRIMARY KEY,
+      title TEXT NOT NULL,
+      url TEXT UNIQUE NOT NULL,
+      author TEXT,
+      pubdate TIMESTAMP,
+      content_text TEXT,
+      tags TEXT[],
+      category VARCHAR(100),
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+  `;
+  
+  try {
+    await pool.query(createTableQuery);
+    console.log('✓ Table articles ready');
+  } catch (error) {
+    console.error('Error creating articles table:', error);
     throw error;
   }
 }
@@ -174,20 +214,9 @@ async function updateScrapeState(sourceId, date) {
 }
 
 /**
- * Check if an article already exists by URL
- */
-async function articleExists(url) {
-  const result = await pool.query(
-    'SELECT id FROM articles WHERE url = $1',
-    [url]
-  );
-  return result.rows.length > 0;
-}
-
-/**
  * Insert articles using a transaction
  */
-async function insertArticles(articles) {
+async function insertArticles(articles, sourceCategory) {
   const client = await pool.connect();
   
   try {
@@ -195,8 +224,18 @@ async function insertArticles(articles) {
     
     let inserted = 0;
     let skipped = 0;
+    let rejected = 0;
     
     for (const article of articles) {
+      // Determine category based on content FIRST
+      const category = determineCategory(article.title, article.content_text, sourceCategory);
+      
+      // Skip articles that don't match any allowed category
+      if (!category) {
+        rejected++;
+        continue;
+      }
+      
       // Check if article already exists
       const exists = await client.query(
         'SELECT id FROM articles WHERE url = $1',
@@ -205,12 +244,8 @@ async function insertArticles(articles) {
       
       if (exists.rows.length > 0) {
         skipped++;
-        console.log(`  ⏭ Skipped (exists): ${article.title.substring(0, 50)}...`);
         continue;
       }
-      
-      // Determine category based on content
-      const category = determineCategory(article.title, article.content_text);
       
       // Insert the article
       await client.query(
@@ -232,7 +267,12 @@ async function insertArticles(articles) {
     }
     
     await client.query('COMMIT');
-    return { inserted, skipped };
+    
+    if (rejected > 0) {
+      console.log(`  ⊘ Rejected ${rejected} articles (not in allowed categories)`);
+    }
+    
+    return { inserted, skipped, rejected };
     
   } catch (error) {
     await client.query('ROLLBACK');
@@ -243,20 +283,32 @@ async function insertArticles(articles) {
 }
 
 /**
- * Extract articles from InfoQ HTML page
+ * Extract articles from InfoQ page (LIVE)
  */
-async function extractInfoQArticles(page, category, baseUrl) {
-  return await page.evaluate((category, baseUrl) => {
+async function extractInfoQArticles(page, source) {
+  return await page.evaluate((baseUrl) => {
     const articles = [];
     
-    // Find all article cards (li elements with data-path containing /news/)
-    const cards = document.querySelectorAll('li[data-path*="/news/"]');
+    // Find all article cards (li elements with data-path containing /news/ or article links)
+    const cards = document.querySelectorAll('li[data-path*="/news/"], li[data-path*="/articles/"], .card');
     
     cards.forEach(card => {
       try {
         // Get the article URL
-        const dataPath = card.getAttribute('data-path');
-        if (!dataPath || !dataPath.includes('/news/')) return;
+        let dataPath = card.getAttribute('data-path');
+        
+        // Try alternate selectors if no data-path
+        if (!dataPath) {
+          const linkEl = card.querySelector('a[href*="/news/"], a[href*="/articles/"]');
+          if (linkEl) {
+            dataPath = linkEl.getAttribute('href');
+          }
+        }
+        
+        if (!dataPath) return;
+        
+        // Skip non-article paths
+        if (!dataPath.includes('/news/') && !dataPath.includes('/articles/')) return;
         
         // Extract URL without query parameters
         let url = dataPath.split('?')[0];
@@ -265,25 +317,25 @@ async function extractInfoQArticles(page, category, baseUrl) {
         }
         
         // Title
-        const titleEl = card.querySelector('h3.card__title a, h4.card__title a');
+        const titleEl = card.querySelector('h3.card__title a, h4.card__title a, .card__title a, h3 a, h4 a');
         const title = titleEl ? titleEl.textContent.trim() : null;
         if (!title) return;
         
         // Author
-        const authorEl = card.querySelector('.card__authors a, .authors a');
+        const authorEl = card.querySelector('.card__authors a, .authors a, .author a');
         const author = authorEl ? authorEl.textContent.trim() : null;
         
         // Date - look for the date span
-        const dateEl = card.querySelector('.card__date span, .date span');
-        const dateText = dateEl ? dateEl.textContent.trim() : null;
+        const dateEl = card.querySelector('.card__date span, .date span, time, .card__date');
+        const dateText = dateEl ? (dateEl.getAttribute('datetime') || dateEl.textContent.trim()) : null;
         
         // Excerpt/content
-        const excerptEl = card.querySelector('.card__excerpt, p.card__excerpt');
+        const excerptEl = card.querySelector('.card__excerpt, p.card__excerpt, .excerpt, .summary');
         const content_text = excerptEl ? excerptEl.textContent.trim() : null;
         
         // Topics/tags
-        const topicEls = card.querySelectorAll('.card__topics a, .topics a');
-        const tags = Array.from(topicEls).map(el => el.textContent.trim());
+        const topicEls = card.querySelectorAll('.card__topics a, .topics a, .tags a');
+        const tags = Array.from(topicEls).map(el => el.textContent.trim()).filter(t => t);
         
         articles.push({
           title,
@@ -291,24 +343,23 @@ async function extractInfoQArticles(page, category, baseUrl) {
           author,
           dateText,
           content_text,
-          tags,
-          category
+          tags
         });
         
       } catch (e) {
-        console.error('Error parsing article:', e);
+        // Skip individual article errors
       }
     });
     
     return articles;
-  }, category, baseUrl);
+  }, source.baseUrl);
 }
 
 /**
- * Extract articles from DB-Engines HTML page
+ * Extract articles from DB-Engines page (LIVE)
  */
-async function extractDBEnginesArticles(page, category, baseUrl) {
-  return await page.evaluate((category, baseUrl) => {
+async function extractDBEnginesArticles(page, source) {
+  return await page.evaluate((baseUrl) => {
     const articles = [];
     
     // Find all blog entries
@@ -343,7 +394,7 @@ async function extractDBEnginesArticles(page, category, baseUrl) {
           if (authorLink) {
             author = authorLink.textContent.trim();
           } else if (sponsorSpan) {
-            author = sponsorSpan.textContent.trim().replace(/^\s*/, '').replace(/\s*$/, '');
+            author = sponsorSpan.textContent.trim();
           } else {
             // Try to extract from "by Author Name, Date" pattern
             const byMatch = metaText.match(/by\s+([^,]+),/);
@@ -352,7 +403,7 @@ async function extractDBEnginesArticles(page, category, baseUrl) {
             }
           }
           
-          // Date - look for date pattern at end
+          // Date - look for date pattern
           const dateMatch = metaText.match(/(\d{1,2}\s+\w+\s+\d{4})/);
           if (dateMatch) {
             dateText = dateMatch[1];
@@ -365,8 +416,11 @@ async function extractDBEnginesArticles(page, category, baseUrl) {
         for (const p of paragraphs) {
           // Skip the meta paragraph, get the actual content
           if (!p.querySelector('.blog_date') && !p.querySelector('a.blog_header')) {
-            content_text = p.textContent.trim();
-            if (content_text && content_text.length > 20) break;
+            const text = p.textContent.trim();
+            if (text && text.length > 20) {
+              content_text = text;
+              break;
+            }
           }
         }
         
@@ -382,25 +436,48 @@ async function extractDBEnginesArticles(page, category, baseUrl) {
           author,
           dateText,
           content_text,
-          tags,
-          category
+          tags
         });
         
       } catch (e) {
-        console.error('Error parsing DB-Engines article:', e);
+        // Skip individual article errors
       }
     });
     
     return articles;
-  }, category, baseUrl);
+  }, source.baseUrl);
 }
 
 /**
- * Process a single source
+ * Navigate to URL with retries
+ */
+async function navigateWithRetry(page, url, maxRetries = 3) {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      await page.goto(url, { 
+        waitUntil: 'networkidle2', 
+        timeout: 30000 
+      });
+      return true;
+    } catch (error) {
+      console.log(`  ⚠ Attempt ${attempt}/${maxRetries} failed: ${error.message}`);
+      if (attempt === maxRetries) {
+        throw error;
+      }
+      // Wait before retry
+      await new Promise(resolve => setTimeout(resolve, 2000 * attempt));
+    }
+  }
+  return false;
+}
+
+/**
+ * Process a single source - LIVE scraping
  */
 async function processSource(browser, source) {
   console.log(`\n${'='.repeat(60)}`);
   console.log(`Processing source: ${source.name} (${source.id})`);
+  console.log(`URL: ${source.url}`);
   console.log('='.repeat(60));
   
   const today = getTodayDate();
@@ -420,114 +497,108 @@ async function processSource(browser, source) {
     console.log('First time scraping this source');
   }
   
-  // Collect all articles from all files for this source
-  const allArticles = [];
+  // Create a new page and navigate to live URL
+  const page = await browser.newPage();
   
-  for (const file of source.files) {
-    const filePath = path.join(__dirname, file);
+  // Set user agent to avoid blocking
+  await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+  
+  try {
+    console.log(`  🌐 Fetching: ${source.url}`);
+    await navigateWithRetry(page, source.url);
     
-    // Check if file exists
-    try {
-      await fs.access(filePath);
-    } catch {
-      console.log(`  ⚠ File not found: ${file}`);
-      continue;
-    }
-    
-    console.log(`  Reading: ${file}`);
-    
-    // Read the HTML file
-    const htmlContent = await fs.readFile(filePath, 'utf-8');
-    
-    // Create a new page and load the HTML
-    const page = await browser.newPage();
-    await page.setContent(htmlContent, { waitUntil: 'domcontentloaded' });
+    // Wait a moment for dynamic content
+    await new Promise(resolve => setTimeout(resolve, 2000));
     
     // Extract articles based on source type
     let articles;
-    if (source.id.startsWith('infoq')) {
-      articles = await extractInfoQArticles(page, source.category, source.baseUrl);
-    } else if (source.id === 'db-engines') {
-      articles = await extractDBEnginesArticles(page, source.category, source.baseUrl);
+    if (source.type === 'infoq') {
+      articles = await extractInfoQArticles(page, source);
+    } else if (source.type === 'db-engines') {
+      articles = await extractDBEnginesArticles(page, source);
+    } else {
+      articles = [];
     }
     
-    await page.close();
+    console.log(`  📰 Found ${articles.length} articles on page`);
     
-    console.log(`  Found ${articles.length} articles in ${file}`);
-    allArticles.push(...articles);
-  }
-  
-  console.log(`Total articles found: ${allArticles.length}`);
-  
-  // Parse dates and filter by date range
-  // CRITICAL: Scrape if (pubdate > last_scrape_date) OR (DATE(pubdate) == today)
-  const filteredArticles = [];
-  const todayStr = today; // YYYY-MM-DD format
-  
-  for (const article of allArticles) {
-    const pubdate = parseDate(article.dateText);
+    // Parse dates and filter by date range
+    const filteredArticles = [];
     
-    if (!pubdate) {
-      console.log(`  ⚠ Could not parse date for: ${article.title.substring(0, 40)}... (${article.dateText})`);
-      continue;
-    }
-    
-    // Skip future articles
-    if (pubdate > todayDate) {
-      continue;
-    }
-    
-    // Get article date as YYYY-MM-DD string for comparison
-    const articleDateStr = pubdate.toISOString().split('T')[0];
-    
-    // FILTER LOGIC:
-    // - Always scrape today's articles (articleDateStr === todayStr)
-    // - Scrape articles published after last_scrape_date (pubdate > lastDate)
-    // - Skip articles published on or before last_scrape_date (unless it's today)
-    
-    let shouldScrape = false;
-    
-    if (articleDateStr === todayStr) {
-      // Always collect today's articles
-      shouldScrape = true;
-    } else if (lastScrapeDate) {
-      const lastDate = new Date(lastScrapeDate);
-      // Collect articles published AFTER the last scrape date
-      if (pubdate > lastDate) {
+    for (const article of articles) {
+      const pubdate = parseDate(article.dateText);
+      
+      if (!pubdate) {
+        // If we can't parse the date, include it anyway with today's date
+        filteredArticles.push({
+          ...article,
+          pubdate: todayDate,
+        });
+        continue;
+      }
+      
+      // Skip future articles
+      if (pubdate > todayDate) {
+        continue;
+      }
+      
+      // Get article date as YYYY-MM-DD string for comparison
+      const articleDateStr = pubdate.toISOString().split('T')[0];
+      
+      // FILTER LOGIC:
+      // - Always scrape today's articles
+      // - Scrape articles published after last_scrape_date
+      // - On first run, collect all found articles
+      
+      let shouldScrape = false;
+      
+      if (articleDateStr === today) {
+        shouldScrape = true;
+      } else if (lastScrapeDate) {
+        const lastDate = new Date(lastScrapeDate);
+        if (pubdate > lastDate) {
+          shouldScrape = true;
+        }
+      } else {
+        // First time scraping - collect all
         shouldScrape = true;
       }
-    } else {
-      // First time scraping - collect all historical articles
-      shouldScrape = true;
+      
+      if (shouldScrape) {
+        filteredArticles.push({
+          ...article,
+          pubdate,
+        });
+      }
     }
     
-    if (shouldScrape) {
-      filteredArticles.push({
-        ...article,
-        pubdate,
-      });
+    console.log(`  📋 Articles in date range: ${filteredArticles.length}`);
+    
+    if (filteredArticles.length === 0) {
+      console.log('  ℹ No new articles to insert');
+      await updateScrapeState(source.id, today);
+      return { source: source.id, status: 'success', inserted: 0, skipped: 0, rejected: 0 };
     }
-  }
-  
-  console.log(`Articles in date range: ${filteredArticles.length}`);
-  
-  if (filteredArticles.length === 0) {
-    console.log('No new articles to insert');
+    
+    // Insert articles
+    const { inserted, skipped, rejected } = await insertArticles(filteredArticles, source.category);
+    
+    console.log(`\n  Summary for ${source.name}:`);
+    console.log(`    - Inserted: ${inserted}`);
+    console.log(`    - Skipped (duplicates): ${skipped}`);
+    console.log(`    - Rejected (wrong category): ${rejected || 0}`);
+    
+    // Update scrape state
     await updateScrapeState(source.id, today);
-    return { source: source.id, status: 'success', inserted: 0, skipped: 0 };
+    
+    return { source: source.id, status: 'success', inserted, skipped, rejected: rejected || 0 };
+    
+  } catch (error) {
+    console.error(`  ✗ Error: ${error.message}`);
+    return { source: source.id, status: 'error', error: error.message };
+  } finally {
+    await page.close();
   }
-  
-  // Insert articles
-  const { inserted, skipped } = await insertArticles(filteredArticles);
-  
-  console.log(`\nSummary for ${source.name}:`);
-  console.log(`  - Inserted: ${inserted}`);
-  console.log(`  - Skipped (duplicates): ${skipped}`);
-  
-  // Update scrape state
-  await updateScrapeState(source.id, today);
-  
-  return { source: source.id, status: 'success', inserted, skipped };
 }
 
 /**
@@ -535,7 +606,7 @@ async function processSource(browser, source) {
  */
 async function scrapeNews() {
   console.log('╔══════════════════════════════════════════════════════════╗');
-  console.log('║        News Scraping Agent - InfoQ & DB-Engines          ║');
+  console.log('║      News Scraping Agent - LIVE from InfoQ & DB-Engines  ║');
   console.log('╚══════════════════════════════════════════════════════════╝');
   console.log(`\nStarting at: ${new Date().toISOString()}`);
   console.log(`Today's date: ${getTodayDate()}`);
@@ -545,11 +616,18 @@ async function scrapeNews() {
   try {
     // Ensure tables exist
     await ensureScrapeStateTable();
+    await ensureArticlesTable();
     
     // Launch Puppeteer
     browser = await puppeteer.launch({
       headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox']
+      args: [
+        '--no-sandbox', 
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-accelerated-2d-canvas',
+        '--disable-gpu'
+      ]
     });
     
     console.log('✓ Puppeteer browser launched');
@@ -569,10 +647,12 @@ async function scrapeNews() {
     // Final summary
     console.log('\n' + '═'.repeat(60));
     console.log('FINAL SUMMARY');
+    console.log(`Allowed categories: ${ALLOWED_CATEGORIES.join(', ')}`);
     console.log('═'.repeat(60));
     
     let totalInserted = 0;
     let totalSkipped = 0;
+    let totalRejected = 0;
     
     for (const result of results) {
       console.log(`\n${result.source}:`);
@@ -580,8 +660,10 @@ async function scrapeNews() {
       if (result.status === 'success') {
         console.log(`  Inserted: ${result.inserted}`);
         console.log(`  Skipped: ${result.skipped}`);
+        console.log(`  Rejected: ${result.rejected || 0}`);
         totalInserted += result.inserted;
         totalSkipped += result.skipped;
+        totalRejected += result.rejected || 0;
       } else if (result.status === 'error') {
         console.log(`  Error: ${result.error}`);
       } else if (result.status === 'skipped') {
@@ -592,6 +674,7 @@ async function scrapeNews() {
     console.log(`\n${'─'.repeat(60)}`);
     console.log(`Total new articles inserted: ${totalInserted}`);
     console.log(`Total duplicates skipped: ${totalSkipped}`);
+    console.log(`Total rejected (wrong category): ${totalRejected}`);
     console.log(`\nCompleted at: ${new Date().toISOString()}`);
     
   } catch (error) {

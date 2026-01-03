@@ -187,6 +187,7 @@ export const runNewsScraperIfNeeded = async () => {
   // Check if already ran today
   if (await hasRunToday(scriptName)) {
     console.log(`ℹ️ ${scriptName} already ran today. Skipping.`);
+    console.log('📰 scrappnews.js – daily article scrape already completed for today');
     return { ran: false, newArticlesCount: 0 };
   }
   
@@ -209,6 +210,9 @@ export const runNewsScraperIfNeeded = async () => {
       newArticlesCount,
       totalArticles: afterCount
     });
+    
+    console.log('📰 scrappnews.js executed – daily article scrape completed');
+    console.log(`   New articles found: ${newArticlesCount}, Total articles: ${afterCount}`);
     
     return { ran: true, newArticlesCount };
   } catch (error) {
