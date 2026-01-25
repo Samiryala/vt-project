@@ -14,21 +14,23 @@ const startServer = async () => {
     await pool.query('SELECT NOW()');
     console.log('✓ Database connection verified');
 
-    // Trigger daily scrapers (runs once per day)
-    console.log('📅 Triggering daily scrapers...');
-    try {
-      await triggerDailyScrapers();
-      console.log('✓ Daily scrapers check completed');
-    } catch (scraperError) {
-      console.error('⚠️ Daily scrapers error (non-fatal):', scraperError.message);
-    }
-
-    // Start server
+    // Start server FIRST so it can serve requests immediately
     app.listen(PORT, () => {
       console.log(`✓ Server running on port ${PORT}`);
       console.log(`✓ Environment: ${process.env.NODE_ENV || 'development'}`);
       console.log(`✓ Health check: http://localhost:${PORT}/health`);
     });
+
+    // Trigger daily scrapers in BACKGROUND (non-blocking)
+    console.log('📅 Starting daily scrapers in background...');
+    triggerDailyScrapers()
+      .then(() => {
+        console.log('✓ Daily scrapers completed in background');
+      })
+      .catch((scraperError) => {
+        console.error('⚠️ Daily scrapers error (non-fatal):', scraperError.message);
+      });
+
   } catch (error) {
     console.error('✗ Failed to start server:', error);
     process.exit(1);

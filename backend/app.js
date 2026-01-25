@@ -5,6 +5,7 @@ import authRoutes from './routes/authRoutes.js';
 import articlesRoutes from './routes/articlesRoutes.js';
 import newsRoutes from './routes/newsRoutes.js';
 import notificationRoutes from './routes/notificationRoutes.js';
+import scraperRoutes from './routes/scraperRoutes.js';
 
 // Load environment variables
 dotenv.config();
@@ -27,6 +28,7 @@ app.use('/api/auth', authRoutes);
 app.use('/api/articles', articlesRoutes);
 app.use('/api/news', newsRoutes);
 app.use('/api/notifications', notificationRoutes);
+app.use('/api/scraper', scraperRoutes);
 
 // Health check endpoint
 app.get('/health', (req, res) => {

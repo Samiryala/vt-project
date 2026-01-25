@@ -2,18 +2,26 @@
  * Scraper Routes
  * 
  * API endpoints for daily scraping automation and news/releases data.
+ * Includes manual scraping with 5/day limit.
  */
 
 import express from 'express';
 import {
   triggerScrapers,
+  triggerManualScraping,
+  startNonBlockingScraping,
+  getScrapingJobStatus,
   getTodaysNews,
   getTodaysReleases,
   getAllReleases,
   getNotifications,
   markNotificationRead,
   markAllNotificationsRead,
-  getScraperStatus
+  getScraperStatus,
+  processArticles,
+  getProcessingStats,
+  getRemainingExecutions,
+  getScrapingHistory
 } from '../controllers/scraperController.js';
 import { verifyToken } from '../middleware/authMiddleware.js';
 
@@ -27,11 +35,62 @@ const router = express.Router();
 router.post('/trigger', verifyToken, triggerScrapers);
 
 /**
+ * POST /api/scraper/manual
+ * Manually trigger scrapers (limited to 5/day) - BLOCKING
+ * Body: { scrapeNews?: boolean, scrapeReleases?: boolean }
+ * Protected - requires authentication
+ */
+router.post('/manual', verifyToken, triggerManualScraping);
+
+/**
+ * POST /api/scraper/start
+ * Start non-blocking scraping (returns immediately)
+ * Body: { scrapeNews?: boolean, scrapeReleases?: boolean }
+ * Protected - requires authentication
+ */
+router.post('/start', verifyToken, startNonBlockingScraping);
+
+/**
+ * GET /api/scraper/job-status
+ * Get current scraping job status (for polling)
+ * Protected - requires authentication
+ */
+router.get('/job-status', verifyToken, getScrapingJobStatus);
+
+/**
+ * POST /api/scraper/process
+ * Process raw articles (run data processing)
+ * Protected - requires authentication
+ */
+router.post('/process', verifyToken, processArticles);
+
+/**
  * GET /api/scraper/status
- * Check if scrapers have run today
+ * Get full scraper status with execution limits
  * Protected - requires authentication
  */
 router.get('/status', verifyToken, getScraperStatus);
+
+/**
+ * GET /api/scraper/remaining-executions
+ * Get remaining manual executions for today
+ * Protected - requires authentication
+ */
+router.get('/remaining-executions', verifyToken, getRemainingExecutions);
+
+/**
+ * GET /api/scraper/processing-stats
+ * Get processing statistics
+ * Protected - requires authentication
+ */
+router.get('/processing-stats', verifyToken, getProcessingStats);
+
+/**
+ * GET /api/scraper/history
+ * Get scraping history by source
+ * Protected - requires authentication
+ */
+router.get('/history', verifyToken, getScrapingHistory);
 
 /**
  * GET /api/news/today

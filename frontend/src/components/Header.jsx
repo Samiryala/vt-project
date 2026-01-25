@@ -2,6 +2,7 @@ import React from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../hooks/useAuth';
 import NotificationBell from './NotificationBell';
+import ScrapingButton from './ScrapingButton';
 import './Header.css';
 
 const Header = () => {
@@ -23,6 +24,7 @@ const Header = () => {
         <nav className="header-nav">
           {isAuthenticated ? (
             <div className="header-user">
+              <ScrapingButton />
               <NotificationBell />
               <span className="header-username">Welcome, {user?.username}</span>
               <button onClick={handleLogout} className="btn-logout">
